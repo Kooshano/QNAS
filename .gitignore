@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+eggs/
+*.egg-info/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# PyTorch / Model artifacts
+*.pt
+*.pth
+*.ckpt
+weights/
+
+# IDE / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data (downloaded datasets)
+data/
+
+# Logs: run data (CSVs, progress.log, .env snapshot) — LOG_DIR / DATASET_LOG_DIR
+logs/
+
+# Outputs: generated artifacts (plots in outputs/figures/, circuit diagrams in outputs/circuit_diagrams/)
+outputs/
+
+# Environment (user-specific)
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+
+# mypy
+.mypy_cache/

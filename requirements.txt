@@ -1,0 +1,25 @@
+# Core (NSGA-II + QNAS training)
+torch>=2.0
+torchvision
+pennylane>=0.33
+pennylane-lightning
+pymoo>=0.6
+numpy>=1.24
+tqdm
+
+# Data and evaluation
+pandas
+scipy
+scikit-learn
+
+# Visualization (plot.py, analysis scripts)
+matplotlib
+seaborn
+Pillow
+
+# Optional: wire-cutting (qnas.utils.cutter)
+# tensorflow
+
+# Optional: circuit transpilation (scripts.utils.transpile_circuit)
+# qiskit
+# qiskit-ibm-runtime
