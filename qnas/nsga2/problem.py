@@ -9,7 +9,7 @@ from pymoo.core.problem import ElementwiseProblem
 from ..models.config import QConfig
 from ..quantum.circuits import EMBED_ALL
 from ..quantum.metrics import f3_num_subcircuits, _modes_str
-from ..utils.logging_utils import _csv_append, _append_progress, _status_update, NSGA_EVAL_CSV, EVAL_HEADER, _get_worker_info
+from ..utils import logging_utils as log_utils
 from ..utils.config import (
     NQ_MIN, NQ_MAX, DEPTH_MIN, DEPTH_MAX, ERANGE_MIN, ERANGE_MAX,
     CMODE_MIN, CMODE_MAX, LR_MIN, LR_MAX, SHOTS, ALLOWED_EMBEDDINGS,
@@ -19,13 +19,13 @@ from ..utils.config import (
 
 def _get_gpu_id():
     """Get current worker GPU ID."""
-    gpu_id, _ = _get_worker_info()
+    gpu_id, _ = log_utils._get_worker_info()
     return gpu_id
 
 
 def _get_worker_rank():
     """Get current worker rank."""
-    _, rank = _get_worker_info()
+    _, rank = log_utils._get_worker_info()
     return rank
 
 
@@ -122,14 +122,16 @@ def _fit_prediction_model_from_checkpoint_data(checkpoint_file: str, checkpoint_
         slope = model.coef_[0]
         intercept = model.intercept_
         
-        _append_progress(f"[PREDICTION MODEL] Fitted from {checkpoint_file}: "
-                        f"slope={slope:.4f}, intercept={intercept:.4f}, "
-                        f"pearson_r={pearson_corr:.4f}, p_value={pearson_p:.6f}, n_samples={len(merged)}")
+        log_utils._append_progress(
+            f"[PREDICTION MODEL] Fitted from {checkpoint_file}: "
+            f"slope={slope:.4f}, intercept={intercept:.4f}, "
+            f"pearson_r={pearson_corr:.4f}, p_value={pearson_p:.6f}, n_samples={len(merged)}"
+        )
         
         return slope, intercept
         
     except Exception as e:
-        _append_progress(f"[PREDICTION MODEL] Failed to fit from checkpoint data: {e}")
+        log_utils._append_progress(f"[PREDICTION MODEL] Failed to fit from checkpoint data: {e}")
         raise
 
 
@@ -158,7 +160,7 @@ def _load_prediction_model() -> Tuple[float, float]:
             _fitted_model_loaded = True
             return _fitted_slope, _fitted_intercept
         except Exception as e:
-            _append_progress(f"[PREDICTION MODEL] Warning: Could not load from file {PREDICTION_MODEL_FILE}: {e}")
+            log_utils._append_progress(f"[PREDICTION MODEL] Warning: Could not load from file {PREDICTION_MODEL_FILE}: {e}")
     
     # Try to auto-fit from current run's checkpoint data
     if PREDICTION_MODEL_ENABLED and DATASET_LOG_DIR:
@@ -169,13 +171,15 @@ def _load_prediction_model() -> Tuple[float, float]:
                 _fitted_model_loaded = True
                 return _fitted_slope, _fitted_intercept
             except Exception as e:
-                _append_progress(f"[PREDICTION MODEL] Warning: Could not auto-fit from {checkpoint_file}: {e}")
+                log_utils._append_progress(f"[PREDICTION MODEL] Warning: Could not auto-fit from {checkpoint_file}: {e}")
     
     # Fall back to default parameters from config
     _fitted_slope = PREDICTION_SLOPE
     _fitted_intercept = PREDICTION_INTERCEPT
     _fitted_model_loaded = True
-    _append_progress(f"[PREDICTION MODEL] Using default parameters: slope={_fitted_slope:.4f}, intercept={_fitted_intercept:.4f}")
+    log_utils._append_progress(
+        f"[PREDICTION MODEL] Using default parameters: slope={_fitted_slope:.4f}, intercept={_fitted_intercept:.4f}"
+    )
     
     return _fitted_slope, _fitted_intercept
 
@@ -274,58 +278,21 @@ class QNNHyperProblem(ElementwiseProblem):
         eval_id = _next_eval_id()
         cfg = self._decode(x)
 
-        # Get current generation from shared variable at the START of evaluation
-        # Strategy: The callback sets counter to 'gen' (completed generation) after each generation.
-        # When a new generation starts, the counter still has the previous generation's value.
-        # We need to detect when we're in a new generation and increment accordingly.
-        # Problem: All -001 evaluations in generation 0 run concurrently, so we can't use -001 as a signal.
-        # Solution: Use a compare-and-swap approach - only increment if we successfully update from the old value.
+        # Read generation snapshot at evaluation start.
+        # The callback updates CURRENT_GENERATION once per completed generation.
         current_gen = -1
         if CURRENT_GENERATION is not None:
             try:
-                with CSV_LOCK:
-                    read_val = int(CURRENT_GENERATION.value)
-                    
-                    # If this is a -001 evaluation, we might be starting a new generation
-                    # Use compare-and-swap: try to increment from read_val to read_val+1
-                    # Only one evaluation will succeed (the first one to read the value)
-                    if eval_id.endswith('-001') and read_val >= 0:
-                        # Try to increment: set to read_val + 1
-                        # This is safe because we're in a lock, so only one thread can do this at a time
-                        # But wait - multiple processes! The lock is shared, so this should still work.
-                        # Actually, the issue is that multiple -001 evaluations in gen 0 all read 0,
-                        # so they all try to set it to 1. We need to ensure only one succeeds.
-                        # Since we're in a lock, only one process can execute this at a time.
-                        # So if we read 0 and set to 1, the next one will read 1 and set to 2.
-                        # That's still wrong!
-                        
-                        # Better: Check if we're actually in a new generation by comparing
-                        # the counter value to what we expect. But we don't know what we expect!
-                        
-                        # Actually, the simplest fix: Don't increment for generation 0.
-                        # Generation 0 evaluations should read 0 (which is correct).
-                        # Only increment when we detect we're in generation 1 or later.
-                        # How? If read_val is 0 and this is the first time we're seeing it, stay at 0.
-                        # If read_val is N > 0, we're in generation N+1, so increment to N+1.
-                        
-                        if read_val == 0:
-                            # Generation 0: stay at 0
-                            current_gen = 0
-                        else:
-                            # Generation read_val+1: increment to read_val+1
-                            current_gen = read_val + 1
-                            CURRENT_GENERATION.value = current_gen
-                            _append_progress(f"[DEBUG {eval_id}] New generation detected: counter {read_val} -> {current_gen}")
-                    else:
-                        # Not a -001 evaluation, use the current counter value
-                        current_gen = read_val
+                if CSV_LOCK is not None:
+                    with CSV_LOCK:
+                        current_gen = int(CURRENT_GENERATION.value)
+                else:
+                    current_gen = int(CURRENT_GENERATION.value)
             except Exception as e:
-                # If reading fails, default to -1 (unknown generation)
-                _append_progress(f"[DEBUG {eval_id}] Failed to read generation: {e}")
-                pass
+                log_utils._append_progress(f"[DEBUG {eval_id}] Failed to read generation: {e}")
 
-        _append_progress(f"[GPU{_get_gpu_id()}|{eval_id}] queued evaluation")
-        _status_update({"stage": "eval_start", "eval_id": eval_id})
+        log_utils._append_progress(f"[GPU{_get_gpu_id()}|{eval_id}] queued evaluation")
+        log_utils._status_update({"stage": "eval_start", "eval_id": eval_id})
         t0 = time.time()
         try:
             vloss, vacc, _model, val_time, val_samples = train_for_budget(cfg, eval_id, EVAL_EPOCHS,
@@ -351,7 +318,7 @@ class QNNHyperProblem(ElementwiseProblem):
             # Note: current_gen was already read at the start of evaluation (above)
             # This ensures we capture the generation when the evaluation began, not when it finished
             
-            _csv_append(NSGA_EVAL_CSV, {
+            log_utils._csv_append(log_utils.NSGA_EVAL_CSV, {
                 "eval_id": eval_id, "gen_est": current_gen,
                 "embed": cfg.embed_kind, "n_qubits": cfg.n_qubits, "depth": cfg.depth,
                 "ent_ranges": "-".join(map(str, cfg.ent_ranges)),
@@ -362,9 +329,12 @@ class QNNHyperProblem(ElementwiseProblem):
                 "f3_n_subcircuits": f"{int(f3)}",
                 "q_backend": _model.q_backend, "seconds": f"{secs:.2f}",
                 "gpu_id": _get_gpu_id(), "worker_rank": _get_worker_rank(), "pid": os.getpid()
-            }, EVAL_HEADER)
-            _append_progress(f"[GPU{_get_gpu_id()}|{eval_id}] DONE in {secs:.1f}s | val_acc={vacc:.2f}% | time_cost={f2:.6f}s/sample | n_sub={f3}")
-            _status_update({"stage": "eval_done", "eval_id": eval_id, "val_acc": vacc, "val_loss": vloss, "seconds": secs})
+            }, log_utils.EVAL_HEADER)
+            log_utils._append_progress(
+                f"[GPU{_get_gpu_id()}|{eval_id}] DONE in {secs:.1f}s | val_acc={vacc:.2f}% | "
+                f"time_cost={f2:.6f}s/sample | n_sub={f3}"
+            )
+            log_utils._status_update({"stage": "eval_done", "eval_id": eval_id, "val_acc": vacc, "val_loss": vloss, "seconds": secs})
             
             # Include f3 in objectives only when CUT_TARGET_QUBITS > 0
             if CUT_TARGET_QUBITS > 0:
@@ -373,11 +343,10 @@ class QNNHyperProblem(ElementwiseProblem):
                 out["F"] = np.array([f1, float(f2)], dtype=float)
         except Exception as ex:
             secs = time.time() - t0
-            _append_progress(f"[GPU{_get_gpu_id()}|{eval_id}] ERROR after {secs:.1f}s: {repr(ex)}")
-            _status_update({"stage": "eval_error", "eval_id": eval_id, "error": str(ex), "seconds": secs})
+            log_utils._append_progress(f"[GPU{_get_gpu_id()}|{eval_id}] ERROR after {secs:.1f}s: {repr(ex)}")
+            log_utils._status_update({"stage": "eval_error", "eval_id": eval_id, "error": str(ex), "seconds": secs})
             # Error penalty values match the number of objectives
             if CUT_TARGET_QUBITS > 0:
                 out["F"] = np.array([1.0, 1e9, 1e6], dtype=float)
             else:
                 out["F"] = np.array([1.0, 1e9], dtype=float)
-

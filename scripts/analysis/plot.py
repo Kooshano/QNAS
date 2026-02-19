@@ -31,10 +31,13 @@ import subprocess
 import sys
 import shutil
 import re
-from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Callable
 from PIL import Image
 from matplotlib.gridspec import GridSpec
+try:
+    from .plot_common import PlotConfig, save_figure, log_section, log_step
+except ImportError:
+    from plot_common import PlotConfig, save_figure, log_section, log_step
 warnings.filterwarnings('ignore')
 
 # Import config values
@@ -56,73 +59,8 @@ sns.set_palette("husl")
 # CONFIGURATION
 # =============================================================================
 
-@dataclass
-class PlotConfig:
-    """Centralized configuration for all plots."""
-    output_dir: Path = field(default_factory=lambda: Path("outputs"))  # Will be set to run-specific dir
-    font_size: int = 14
-    file_ext: str = "png"
-    dpi: int = 300
-    figsize_small: tuple = (8, 6)
-    figsize_medium: tuple = (12, 8)
-    figsize_large: tuple = (16, 10)
-    figsize_wide: tuple = (18, 6)
-    colors: List = field(default_factory=lambda: sns.color_palette("colorblind"))
-    
-    def __post_init__(self):
-        self.output_dir = Path(self.output_dir)
-        # Don't create directory here - it will be created when actually saving files
-        # This prevents creating "outputs/figures" before we can set the run-specific path
-    
-    def ensure_output_dir(self):
-        """Create output directory if it doesn't exist. Call this after setting the final path."""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-
-
 # Global config instance
 PLOT_CONFIG = PlotConfig()
-
-
-def save_figure(fig, name: str, config: PlotConfig = None, category: str = None):
-    """Save figure with consistent naming and logging.
-    
-    Args:
-        fig: Matplotlib figure
-        name: Base name for the file (e.g., 'evolution_accuracy')
-        config: PlotConfig instance (uses global if None)
-        category: Optional category prefix (e.g., 'pareto', 'evolution')
-    """
-    if config is None:
-        config = PLOT_CONFIG
-    
-    # Build filename: {category}_{name}.{ext} or just {name}.{ext}
-    if category:
-        filename = f"{category}_{name}.{config.file_ext}"
-    else:
-        filename = f"{name}.{config.file_ext}"
-    
-    filepath = config.output_dir / filename
-    
-    if config.file_ext == "svg":
-        fig.savefig(filepath, format='svg', bbox_inches='tight')
-    else:
-        fig.savefig(filepath, dpi=config.dpi, bbox_inches='tight')
-    
-    plt.close(fig)
-    print(f"  [SAVED] {filename}")
-    return filepath
-
-
-def log_section(title: str):
-    """Print section header for consistent logging."""
-    print(f"\n{'='*60}")
-    print(f"  {title}")
-    print(f"{'='*60}")
-
-
-def log_step(step_num: int, description: str):
-    """Print step info for consistent logging."""
-    print(f"\n[{step_num}] {description}")
 
 
 # Legacy alias for compatibility

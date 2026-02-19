@@ -77,9 +77,9 @@ Each run directory (`logs/nsga-ii/{dataset}/run_{timestamp}/`) contains:
 - `nsga_evals.csv` - All candidate evaluations with objectives
 - `nsga_gen_summary.csv` - Per-generation statistics
 - `train_epoch_log.csv` - Training curves
-- `.env` - Configuration snapshot
+- `config_{timestamp}.env` - Configuration snapshot
 
-To reproduce: copy the `.env` from a run directory to project root and re-execute.
+To reproduce: copy the `config_{timestamp}.env` from a run directory to project root as `.env` and re-execute.
 
 ## Project Structure
 
@@ -107,6 +107,7 @@ QNAS/
 ├── scripts/
 │   ├── analysis/
 │   │   ├── plot.py                 # Visualization suite
+│   │   ├── plot_common.py          # Shared plotting config/utilities
 │   │   └── correlate_nsga_vs_final.py
 │   └── training/
 │       └── run_final_training.py   # Pareto front retraining
@@ -126,6 +127,7 @@ Key parameters in `.env`:
 | `POP_SIZE` | Population size | 12 |
 | `N_GEN` | Generations | 6 |
 | `EVAL_EPOCHS` | Epochs per candidate | 2 |
+| `TRAIN_DROP_LAST` | Drop incomplete final training batch | false |
 | `NQ_MIN/MAX` | Qubit range | 2-8 |
 | `DEPTH_MIN/MAX` | Circuit depth range | 1-4 |
 | `SHOTS` | 0=adjoint, >0=parameter-shift | 0 |
@@ -135,7 +137,7 @@ Key parameters in `.env`:
 
 **Logs** (`logs/`): run data written by the framework (configured by `LOG_DIR` in `.env`):
 - **Base:** `LOG_DIR` (default `./logs`) is the root for all run logs.
-- **Per run:** Each NSGA-II run gets `logs/nsga-ii/{DATASET}/run_{timestamp}/` (this path is `DATASET_LOG_DIR`). All CSVs, `progress.log`, and a `.env` snapshot live here. Scripts that continue training or run final training point at this run directory.
+- **Per run:** Each NSGA-II run gets `logs/nsga-ii/{DATASET}/run_{timestamp}/` (this path is `DATASET_LOG_DIR`). All CSVs, `progress.log`, and a `config_{timestamp}.env` snapshot live here. Scripts that continue training or run final training point at this run directory.
 
 ```
 logs/
@@ -146,7 +148,7 @@ logs/
             ├── nsga_gen_summary.csv
             ├── train_epoch_log.csv
             ├── progress.log
-            ├── .env
+            ├── config_20260101-120000.env
             └── status/
 ```
 

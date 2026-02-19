@@ -1,32 +1,26 @@
 """
 Logging utilities for CSV files and progress logging.
 """
-import os
-import csv
-import time
-import json
+
 import contextlib
+import csv
+import json
+import os
+import sys
+import threading
+import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
-from .config import DATASET_LOG_DIR, CHECKPOINT_VALIDATION_ENABLED, IS_IMPORTED, CNOT_MODES
+from . import config as cfg
 
-# CSV file paths (can be overridden via environment)
-default_nsga_csv = os.path.join(DATASET_LOG_DIR, "nsga_evals.csv")
-default_epoch_csv = os.path.join(DATASET_LOG_DIR, "train_epoch_log.csv")
-default_gen_csv = os.path.join(DATASET_LOG_DIR, "nsga_gen_summary.csv")
-default_checkpoint_csv = os.path.join(DATASET_LOG_DIR, "checkpoint_validation.csv")
+try:
+    import fcntl  # Unix only
+    HAS_FCNTL = True
+except ImportError:
+    fcntl = None
+    HAS_FCNTL = False
 
-NSGA_EVAL_CSV = os.environ.get("NSGA_EVAL_CSV", default_nsga_csv)
-EPOCH_LOG_CSV = os.environ.get("EPOCH_LOG_CSV", default_epoch_csv)
-GEN_SUMMARY_CSV = os.environ.get("GEN_SUMMARY_CSV", default_gen_csv)
-CHECKPOINT_LOG_CSV = os.environ.get("CHECKPOINT_LOG_CSV", default_checkpoint_csv)
-default_progress_log = os.path.join(DATASET_LOG_DIR, "progress.log")
-PROGRESS_LOG = os.environ.get("PROGRESS_LOG", default_progress_log)
-
-STATUS_DIR = os.path.join(DATASET_LOG_DIR, "status")
-if not IS_IMPORTED:
-    os.makedirs(STATUS_DIR, exist_ok=True)
 
 # CSV Headers
 EVAL_HEADER = [
@@ -52,221 +46,269 @@ CHECKPOINT_HEADER = [
     "gpu_id", "worker_rank", "pid", "timestamp"
 ]
 
-# Global locks and counters (set by NSGA-II runner)
+
+# Paths are refreshed dynamically so imports stay side-effect free.
+NSGA_EVAL_CSV = ""
+EPOCH_LOG_CSV = ""
+GEN_SUMMARY_CSV = ""
+CHECKPOINT_LOG_CSV = ""
+PROGRESS_LOG = ""
+STATUS_DIR = ""
+
+# Global locks/counters (set by NSGA-II runner)
 CSV_LOCK = None
 GLOBAL_COUNTER = None
 CURRENT_GENERATION = None
 
+# Fallback lock for platforms without fcntl
+_THREAD_LOCK = threading.RLock()
+
+
+def _warn(message: str) -> None:
+    print(f"[WARN] {message}", file=sys.stderr)
+
+
+def _resolve_dataset_log_dir() -> str:
+    env_dir = os.environ.get("DATASET_LOG_DIR", "").strip()
+    if env_dir:
+        resolved = os.path.abspath(env_dir)
+        if resolved != cfg.DATASET_LOG_DIR:
+            cfg.set_dataset_log_dir(resolved, create=False)
+        return resolved
+
+    return cfg.DATASET_LOG_DIR
+
+
+def refresh_logging_paths(dataset_log_dir: Optional[str] = None) -> None:
+    """Refresh runtime logging paths from env/config (no filesystem writes)."""
+    global NSGA_EVAL_CSV, EPOCH_LOG_CSV, GEN_SUMMARY_CSV, CHECKPOINT_LOG_CSV, PROGRESS_LOG, STATUS_DIR
+
+    if dataset_log_dir:
+        cfg.set_dataset_log_dir(dataset_log_dir, create=False)
+
+    base_dir = _resolve_dataset_log_dir()
+
+    default_nsga_csv = os.path.join(base_dir, "nsga_evals.csv")
+    default_epoch_csv = os.path.join(base_dir, "train_epoch_log.csv")
+    default_gen_csv = os.path.join(base_dir, "nsga_gen_summary.csv")
+    default_checkpoint_csv = os.path.join(base_dir, "checkpoint_validation.csv")
+    default_progress_log = os.path.join(base_dir, "progress.log")
+
+    NSGA_EVAL_CSV = os.environ.get("NSGA_EVAL_CSV", default_nsga_csv)
+    EPOCH_LOG_CSV = os.environ.get("EPOCH_LOG_CSV", default_epoch_csv)
+    GEN_SUMMARY_CSV = os.environ.get("GEN_SUMMARY_CSV", default_gen_csv)
+    CHECKPOINT_LOG_CSV = os.environ.get("CHECKPOINT_LOG_CSV", default_checkpoint_csv)
+    PROGRESS_LOG = os.environ.get("PROGRESS_LOG", default_progress_log)
+    STATUS_DIR = os.path.join(base_dir, "status")
+
+
+refresh_logging_paths()
+
+
+def _ensure_parent_dir(path: str) -> None:
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, exist_ok=True)
+
+
+@contextlib.contextmanager
+def _file_lock(path: str):
+    """Cross-process lock using .lock files on Unix; thread lock fallback elsewhere."""
+    lock_path = f"{path}.lock"
+    _ensure_parent_dir(lock_path)
+
+    if HAS_FCNTL:
+        with open(lock_path, "a", encoding="utf-8") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+    else:
+        with _THREAD_LOCK:
+            yield
+
 
 def _get_worker_info():
     """Get current worker GPU ID and rank from config module."""
-    from .config import WORKER_GPU_ID, WORKER_RANK
-    return WORKER_GPU_ID, WORKER_RANK
+    return cfg.WORKER_GPU_ID, cfg.WORKER_RANK
 
 
-# Module-level worker info (synced from config)
-WORKER_GPU_ID = -1
-WORKER_RANK = -1
-
-
-def _csv_prepare(path: str, header: List[str]):
+def _csv_prepare(path: str, header: List[str]) -> None:
     """Create CSV file with header if it doesn't exist."""
-    if not os.path.exists(path):
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", newline="") as f:
-                csv.DictWriter(f, fieldnames=header).writeheader()
-        except Exception:
-            pass
+    refresh_logging_paths()
+    with _file_lock(path):
+        _ensure_parent_dir(path)
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            csv.DictWriter(f, fieldnames=header).writeheader()
 
 
-def _csv_append(path: str, row: Dict[str, Any], header: List[str]):
-    """Append a row to CSV file with thread-safe locking."""
+def _csv_append(path: str, row: Dict[str, Any], header: List[str]) -> None:
+    """Append a row to CSV file with inter-process-safe locking."""
+    refresh_logging_paths()
+
+    def _append_once() -> None:
+        with _file_lock(path):
+            _ensure_parent_dir(path)
+            needs_header = (not os.path.exists(path)) or (os.path.getsize(path) == 0)
+            with open(path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+                if needs_header:
+                    writer.writeheader()
+                writer.writerow(row)
+
     try:
         if CSV_LOCK is not None:
-            try:
-                with CSV_LOCK:
-                    with open(path, "a", newline="") as f:
-                        csv.DictWriter(f, fieldnames=header, extrasaction="ignore").writerow(row)
-                return
-            except Exception:
-                pass
-        with open(path, "a", newline="") as f:
-            csv.DictWriter(f, fieldnames=header, extrasaction="ignore").writerow(row)
-    except Exception:
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "a", newline="") as f:
-                csv.DictWriter(f, fieldnames=header, extrasaction="ignore").writerow(row)
-        except Exception:
-            pass
+            with CSV_LOCK:
+                _append_once()
+        else:
+            _append_once()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to append CSV row to {path}: {exc}") from exc
 
 
-def _append_progress(line: str):
+def _append_progress(line: str) -> None:
     """Append a line to the progress log file."""
+    refresh_logging_paths()
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     try:
-        with open(PROGRESS_LOG, "a") as f:
-            f.write(f"[{ts}] {line}\n")
-    except Exception:
-        pass
+        with _file_lock(PROGRESS_LOG):
+            _ensure_parent_dir(PROGRESS_LOG)
+            with open(PROGRESS_LOG, "a", encoding="utf-8") as f:
+                f.write(f"[{ts}] {line}\n")
+    except Exception as exc:
+        _warn(f"Could not append to progress log ({PROGRESS_LOG}): {exc}")
 
 
-def _now_iso():
+def _now_iso() -> str:
     """Get current time as ISO format string."""
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
-def _status_update(payload: Dict[str, Any]):
+def _status_update(payload: Dict[str, Any]) -> None:
     """Update GPU status JSON file."""
+    refresh_logging_paths()
     gpu_id, _ = _get_worker_info()
     if gpu_id < 0:
         return
+
+    status_file = os.path.join(STATUS_DIR, f"worker_gpu{gpu_id}_status.json")
+    tmp_file = f"{status_file}.tmp"
+    payload["timestamp"] = _now_iso()
+
     try:
-        status_file = os.path.join(STATUS_DIR, f"worker_gpu{gpu_id}_status.json")
-        payload["timestamp"] = _now_iso()
-        with open(status_file, "w") as f:
-            json.dump(payload, f, indent=2)
-    except Exception:
-        pass
+        with _file_lock(status_file):
+            os.makedirs(STATUS_DIR, exist_ok=True)
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_file, status_file)
+    except Exception as exc:
+        _warn(f"Could not update status file {status_file}: {exc}")
+        with contextlib.suppress(Exception):
+            if os.path.exists(tmp_file):
+                os.remove(tmp_file)
 
 
-def _csv_reset_all():
+def _csv_reset_all() -> None:
     """Reset all CSV files and progress log at the start of a run."""
+    refresh_logging_paths()
+
     files = [
         (NSGA_EVAL_CSV, EVAL_HEADER),
         (EPOCH_LOG_CSV, EPOCH_HEADER),
         (GEN_SUMMARY_CSV, GEN_HEADER),
     ]
-    if CHECKPOINT_VALIDATION_ENABLED:
+    if cfg.CHECKPOINT_VALIDATION_ENABLED:
         files.append((CHECKPOINT_LOG_CSV, CHECKPOINT_HEADER))
-    
+
     for path, header in files:
-        try:
-            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", newline="") as f:
+        with _file_lock(path):
+            _ensure_parent_dir(path)
+            with open(path, "w", newline="", encoding="utf-8") as f:
                 csv.DictWriter(f, fieldnames=header).writeheader()
-        except Exception:
-            pass
-    
-    # Reset progress log
-    try:
-        with open(PROGRESS_LOG, "w") as f:
+
+    with _file_lock(PROGRESS_LOG):
+        _ensure_parent_dir(PROGRESS_LOG)
+        with open(PROGRESS_LOG, "w", encoding="utf-8") as f:
             f.write("")
-    except Exception:
-        pass
-    
-    # Clear stale status files
-    try:
-        if os.path.isdir(STATUS_DIR):
-            for fn in os.listdir(STATUS_DIR):
-                if fn.endswith("_status.json") or fn.endswith(".tmp"):
-                    with contextlib.suppress(Exception):
-                        os.remove(os.path.join(STATUS_DIR, fn))
-    except Exception:
-        pass
 
-
-# Initialize CSV files
-_csv_prepare(NSGA_EVAL_CSV, EVAL_HEADER)
-_csv_prepare(EPOCH_LOG_CSV, EPOCH_HEADER)
-_csv_prepare(GEN_SUMMARY_CSV, GEN_HEADER)
-if CHECKPOINT_VALIDATION_ENABLED:
-    _csv_prepare(CHECKPOINT_LOG_CSV, CHECKPOINT_HEADER)
+    os.makedirs(STATUS_DIR, exist_ok=True)
+    for fn in os.listdir(STATUS_DIR):
+        if fn.endswith("_status.json") or fn.endswith(".tmp"):
+            with contextlib.suppress(Exception):
+                os.remove(os.path.join(STATUS_DIR, fn))
 
 
 def _modes_str(modes) -> str:
     """Convert CNOT modes list to hyphen-separated string."""
-    from .config import CNOT_MODES
-    return "-".join(CNOT_MODES[int(m)] for m in modes)
+    return "-".join(cfg.CNOT_MODES[int(m)] for m in modes)
 
 
-def log_epoch(eval_id, epoch, tr_loss, tr_acc, va_loss, va_acc, cfg, backend,
-              phase="epoch_end", batch_idx=None, batches_total=None, t0=None):
-    """Log training epoch data to CSV.
-    
-    Args:
-        eval_id: Evaluation ID
-        epoch: Current epoch number
-        tr_loss: Training loss
-        tr_acc: Training accuracy
-        va_loss: Validation loss (None if not available)
-        va_acc: Validation accuracy (None if not available)
-        cfg: QConfig object with model configuration
-        backend: Quantum backend name
-        phase: Training phase ('epoch_end', 'train_batch', etc.)
-        batch_idx: Current batch index (optional)
-        batches_total: Total number of batches (optional)
-        t0: Start time for elapsed calculation (optional)
-    """
-    import time as _time
+def log_epoch(eval_id, epoch, tr_loss, tr_acc, va_loss, va_acc, cfg_obj, backend,
+              phase="epoch_end", batch_idx=None, batches_total=None, t0=None) -> None:
+    """Log training epoch data to CSV."""
     import os as _os
-    
+    import time as _time
+
+    refresh_logging_paths()
+
     gpu_id, worker_rank = _get_worker_info()
     elapsed = (_time.time() - t0) if (t0 is not None) else None
+
     _csv_append(EPOCH_LOG_CSV, {
-        "eval_id": eval_id, "epoch": epoch,
+        "eval_id": eval_id,
+        "epoch": epoch,
         "train_loss": f"{tr_loss:.6f}" if tr_loss is not None else "",
         "train_acc": f"{tr_acc:.4f}" if tr_acc is not None else "",
         "val_loss": f"{va_loss:.6f}" if va_loss is not None else "",
         "val_acc": f"{va_acc:.4f}" if va_acc is not None else "",
-        "embed": cfg.embed_kind, "n_qubits": cfg.n_qubits, "depth": cfg.depth,
-        "ent_ranges": "-".join(map(str, cfg.ent_ranges)) if cfg.ent_ranges else "",
-        "cnot_modes": _modes_str(cfg.cnot_modes) if cfg.cnot_modes else "",
-        "lr": f"{cfg.learning_rate:.6e}" if cfg.learning_rate else "",
-        "q_backend": backend, "shots": (cfg.shots or 0),
-        "gpu_id": gpu_id, "worker_rank": worker_rank, "pid": _os.getpid(),
-        "phase": phase, "batch": batch_idx if batch_idx is not None else "",
+        "embed": cfg_obj.embed_kind,
+        "n_qubits": cfg_obj.n_qubits,
+        "depth": cfg_obj.depth,
+        "ent_ranges": "-".join(map(str, cfg_obj.ent_ranges)) if cfg_obj.ent_ranges else "",
+        "cnot_modes": _modes_str(cfg_obj.cnot_modes) if cfg_obj.cnot_modes else "",
+        "lr": f"{cfg_obj.learning_rate:.6e}" if cfg_obj.learning_rate else "",
+        "q_backend": backend,
+        "shots": (cfg_obj.shots or 0),
+        "gpu_id": gpu_id,
+        "worker_rank": worker_rank,
+        "pid": _os.getpid(),
+        "phase": phase,
+        "batch": batch_idx if batch_idx is not None else "",
         "batches_total": batches_total if batches_total is not None else "",
-        "elapsed_s": f"{elapsed:.3f}" if elapsed is not None else ""
+        "elapsed_s": f"{elapsed:.3f}" if elapsed is not None else "",
     }, EPOCH_HEADER)
 
 
 def log_checkpoint(eval_id: str, epoch: int, checkpoint_size: int, va_loss, va_acc,
-                   cfg, backend: str):
-    """Log checkpoint validation results to CSV.
-    
-    Args:
-        eval_id: Evaluation ID
-        epoch: Epoch number
-        checkpoint_size: Training data size at this checkpoint
-        va_loss: Validation loss (can be None)
-        va_acc: Validation accuracy (can be None)
-        cfg: QConfig object with model configuration
-        backend: Quantum backend name
-    """
-    import time as _time
+                   cfg_obj, backend: str) -> None:
+    """Log checkpoint validation results to CSV."""
     import os as _os
-    
-    if not CHECKPOINT_VALIDATION_ENABLED:
+
+    refresh_logging_paths()
+
+    if not cfg.CHECKPOINT_VALIDATION_ENABLED:
         return
+
     gpu_id, worker_rank = _get_worker_info()
+
     _csv_append(CHECKPOINT_LOG_CSV, {
         "eval_id": eval_id,
         "epoch": epoch,
         "checkpoint_train_size": checkpoint_size,
         "val_loss": f"{va_loss:.6f}" if va_loss is not None else "",
         "val_acc": f"{va_acc:.4f}" if va_acc is not None else "",
-        "embed": cfg.embed_kind,
-        "n_qubits": cfg.n_qubits,
-        "depth": cfg.depth,
-        "ent_ranges": "-".join(map(str, cfg.ent_ranges)) if cfg.ent_ranges else "",
-        "cnot_modes": _modes_str(cfg.cnot_modes) if cfg.cnot_modes else "",
-        "lr": f"{cfg.learning_rate:.6e}" if cfg.learning_rate else "",
+        "embed": cfg_obj.embed_kind,
+        "n_qubits": cfg_obj.n_qubits,
+        "depth": cfg_obj.depth,
+        "ent_ranges": "-".join(map(str, cfg_obj.ent_ranges)) if cfg_obj.ent_ranges else "",
+        "cnot_modes": _modes_str(cfg_obj.cnot_modes) if cfg_obj.cnot_modes else "",
+        "lr": f"{cfg_obj.learning_rate:.6e}" if cfg_obj.learning_rate else "",
         "q_backend": backend,
-        "shots": (cfg.shots or 0),
+        "shots": (cfg_obj.shots or 0),
         "gpu_id": gpu_id,
         "worker_rank": worker_rank,
         "pid": _os.getpid(),
-        "timestamp": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime())
+        "timestamp": _now_iso(),
     }, CHECKPOINT_HEADER)
-
-
-
-
-
-
-
-
-
-

@@ -1,77 +1,57 @@
-"""
-QNAS — Quantum Neural Architecture Search
+"""QNAS package root with lazy exports."""
 
-This package provides tools for optimizing Hybrid Quantum Neural Networks
-using the NSGA-II multi-objective genetic algorithm.
-"""
-__version__ = "1.0.0"
+from importlib import import_module
+from typing import Dict, Tuple
 
-# Backward compatibility exports - import from submodules directly
-# This avoids the RuntimeWarning when running `python -m qnas.main`
+__version__ = "1.1.0"
 
-# Entry points
-from .nsga2.runner import run_nsga2, final_train
+_LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
+    "run_nsga2": ("qnas.nsga2.runner", "run_nsga2"),
+    "final_train": ("qnas.nsga2.runner", "final_train"),
+    "HybridQNN": ("qnas.models", "HybridQNN"),
+    "QConfig": ("qnas.models", "QConfig"),
+    "QNNHyperProblem": ("qnas.nsga2.problem", "QNNHyperProblem"),
+    "ProgressCallback": ("qnas.nsga2.callbacks", "ProgressCallback"),
+    "predict_final_accuracy": ("qnas.nsga2.problem", "predict_final_accuracy"),
+    "get_dataloaders": ("qnas.utils.datasets", "get_dataloaders"),
+    "make_subset": ("qnas.utils.datasets", "make_subset"),
+    "IN_FEATURES": ("qnas.utils.datasets", "IN_FEATURES"),
+    "N_CLASSES": ("qnas.utils.datasets", "N_CLASSES"),
+    "train_for_budget": ("qnas.training", "train_for_budget"),
+    "evaluate": ("qnas.training", "evaluate"),
+    "run_checkpoint_validation": ("qnas.training", "run_checkpoint_validation"),
+    "save_model_weights": ("qnas.utils.model_io", "save_model_weights"),
+    "load_model_weights": ("qnas.utils.model_io", "load_model_weights"),
+    "log_epoch": ("qnas.utils.logging_utils", "log_epoch"),
+    "log_checkpoint": ("qnas.utils.logging_utils", "log_checkpoint"),
+    "entangling_pairs": ("qnas.quantum.circuits", "entangling_pairs"),
+    "_filter_pairs_by_mode": ("qnas.quantum.circuits", "_filter_pairs_by_mode"),
+    "EMBED_ALL": ("qnas.quantum.circuits", "EMBED_ALL"),
+    "EMBED_TO_ROT": ("qnas.quantum.circuits", "EMBED_TO_ROT"),
+    "circuit_cost": ("qnas.quantum.metrics", "circuit_cost"),
+    "_qlayer_to_wirecut_string": ("qnas.quantum.metrics", "_qlayer_to_wirecut_string"),
+    "DATASET": ("qnas.utils.config", "DATASET"),
+    "FINAL_SHOTS": ("qnas.utils.config", "FINAL_SHOTS"),
+    "DATASET_LOG_DIR": ("qnas.utils.config", "DATASET_LOG_DIR"),
+    "LOG_DIR": ("qnas.utils.config", "LOG_DIR"),
+}
 
-# Models
-from .models import HybridQNN, QConfig
 
-# Datasets
-from .utils.datasets import get_dataloaders, make_subset, IN_FEATURES, N_CLASSES
+__all__ = sorted([*_LAZY_EXPORTS.keys(), "config", "logging_utils", "datasets"])
 
-# Training
-from .training import train_for_budget, evaluate, run_checkpoint_validation
 
-# Model I/O
-from .utils.model_io import save_model_weights, load_model_weights
+def __getattr__(name: str):
+    if name in {"config", "logging_utils", "datasets"}:
+        module = import_module(f"qnas.utils.{name}")
+        globals()[name] = module
+        return module
 
-# Logging
-from .utils.logging_utils import log_epoch, log_checkpoint
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module 'qnas' has no attribute '{name}'")
 
-# Quantum circuits
-from .quantum.circuits import entangling_pairs, _filter_pairs_by_mode, EMBED_ALL, EMBED_TO_ROT
-
-# Quantum metrics
-from .quantum.metrics import circuit_cost, _qlayer_to_wirecut_string
-
-# NSGA-II
-from .nsga2.problem import QNNHyperProblem
-from .nsga2.callbacks import ProgressCallback
-
-# Config
-from .utils.config import DATASET, FINAL_SHOTS, DATASET_LOG_DIR, LOG_DIR
-
-# Backward compatibility: Export modules for direct import
-# This allows: from qnas import config, logging_utils, datasets
-from .utils import config, logging_utils, datasets
-
-__all__ = [
-    # Entry points
-    'run_nsga2', 'final_train',
-    
-    # Models
-    'HybridQNN', 'QConfig',
-    
-    # Datasets
-    'get_dataloaders', 'make_subset', 'IN_FEATURES', 'N_CLASSES',
-    
-    # Training
-    'train_for_budget', 'evaluate', 'run_checkpoint_validation',
-    
-    # Model I/O
-    'save_model_weights', 'load_model_weights',
-    
-    # Logging
-    'log_epoch', 'log_checkpoint',
-    
-    # Quantum circuits
-    'entangling_pairs', '_filter_pairs_by_mode', 'EMBED_ALL', 'EMBED_TO_ROT',
-    
-    # Quantum metrics
-    'circuit_cost', '_qlayer_to_wirecut_string',
-    
-    # NSGA-II
-    'QNNHyperProblem', 'ProgressCallback',
-    
-    # Config
-    'DATASET', 'FINAL_SHOTS', 'DATASET_LOG_DIR', 'LOG_DIR',
-]
+    module_name, attr_name = target
+    module = import_module(module_name)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value

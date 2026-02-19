@@ -22,7 +22,7 @@ except ImportError:
 
 from .config import (
     DATASET, BATCH_SIZE, TRAIN_SUBSET_SIZE, VAL_SUBSET_SIZE, DATA_ROOT,
-    DATALOADER_NUM_WORKERS
+    DATALOADER_NUM_WORKERS, TRAIN_DROP_LAST
 )
 
 # Dataset-dependent feature and class counts
@@ -421,7 +421,7 @@ def get_dataloaders(in_pool_worker: bool, train_size: Optional[int] = None,
         num_workers = DATALOADER_NUM_WORKERS
     pin_mem = torch.cuda.is_available()
     
-    train_loader = DataLoader(train_sub, batch_size=BATCH_SIZE, shuffle=True, drop_last=True,
+    train_loader = DataLoader(train_sub, batch_size=BATCH_SIZE, shuffle=True, drop_last=TRAIN_DROP_LAST,
                               num_workers=num_workers, pin_memory=pin_mem)
     val_loader = DataLoader(val_sub, batch_size=BATCH_SIZE, shuffle=False, drop_last=False,
                             num_workers=num_workers, pin_memory=pin_mem)
@@ -431,7 +431,6 @@ def get_dataloaders(in_pool_worker: bool, train_size: Optional[int] = None,
         DATALOADERS = (train_loader, val_loader)
     
     return (train_loader, val_loader)
-
 
 
 

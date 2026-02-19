@@ -224,8 +224,6 @@ def train_for_budget(cfg: QConfig, eval_id: str, epochs: int, max_train_batches:
                 
                 # Clean up intermediate tensors
                 del out, loss, images, labels
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
                 
                 if max_train_batches and it >= max_train_batches: break
             except RuntimeError as e:
@@ -271,4 +269,3 @@ def train_for_budget(cfg: QConfig, eval_id: str, epochs: int, max_train_batches:
     
     # Return best val loss/acc (highest accuracy from epoch 1 to end), for final_training.csv etc.
     return best_val_loss, best_val_acc, model, val_time, val_samples
-

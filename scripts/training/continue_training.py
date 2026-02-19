@@ -7,29 +7,17 @@ Loads saved weights and continues training, appending results to existing CSV fi
 import os
 import sys
 import argparse
-import pandas as pd
-import torch
-import torch.nn as nn
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Tuple
 
 # Add project root to path (go up 3 levels from scripts/training/)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-# Import after setting up path - use new modular structure
-from qnas.models.hybrid_qnn import HybridQNN
 from qnas.models.config import QConfig
-from qnas.utils.datasets import get_dataloaders, IN_FEATURES, N_CLASSES
-from qnas.utils.model_io import save_model_weights, load_model_weights
-from qnas.utils.logging_utils import (
-    log_epoch, log_checkpoint,
-    _append_progress, _status_update,
-    EPOCH_LOG_CSV, CHECKPOINT_LOG_CSV
-)
 from qnas.utils.config import (
-    FINAL_SHOTS, DATASET,
+    FINAL_SHOTS,
     CHECKPOINT_TARGET_EPOCHS, CHECKPOINT_CORRELATION_ENABLED,
-    BATCH_SIZE, FINAL_TRAIN_SUBSET_SIZE, FINAL_VAL_SUBSET_SIZE
+    FINAL_TRAIN_SUBSET_SIZE, FINAL_VAL_SUBSET_SIZE
 )
 
 # Parse CNOT modes string to list
@@ -48,6 +36,8 @@ def load_model_config(weights_path: Path, checkpoint_csv: Path, train_epoch_csv:
     """
     Load model configuration, trying weights file first (if it has metadata), then CSV files.
     """
+    from qnas.utils.model_io import load_model_weights
+
     # Try loading config from weights file first (if it has metadata)
     if weights_path.exists():
         try:
@@ -73,19 +63,21 @@ def load_model_config(weights_path: Path, checkpoint_csv: Path, train_epoch_csv:
 
 def load_model_config_from_csv(checkpoint_csv: Path, train_epoch_csv: Path, eval_id: str) -> Optional[QConfig]:
     """Load model configuration from checkpoint_validation.csv or train_epoch_log.csv for a given eval_id."""
+    import pandas as pd
+
     # Try checkpoint_validation.csv first
     df = pd.read_csv(checkpoint_csv)
     model_rows = df[df['eval_id'] == eval_id]
     
     # If not found in checkpoint_validation.csv, try train_epoch_log.csv
     if model_rows.empty:
-        # Handle malformed CSV rows
-        import re
-        import io
-        with open(train_epoch_csv, 'r') as f:
-            content = f.read()
-        content_fixed = re.sub(r'(\d+\.\d+)(final-random)', r'\1\n\2', content)
-        df = pd.read_csv(io.StringIO(content_fixed))
+        try:
+            df = pd.read_csv(train_epoch_csv)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not parse {train_epoch_csv}. "
+                "The CSV appears malformed; rerun with file-locked logging enabled."
+            ) from exc
         # Filter to epoch_end entries to get config
         epoch_end_df = df[df['phase'] == 'epoch_end']
         model_rows = epoch_end_df[epoch_end_df['eval_id'] == eval_id]
@@ -105,7 +97,7 @@ def load_model_config_from_csv(checkpoint_csv: Path, train_epoch_csv: Path, eval
     
     return QConfig(embed, n_qubits, depth, ent_ranges, cnot_modes, lr, shots)
 
-def find_last_completed_epoch(df: pd.DataFrame, eval_id: str) -> int:
+def find_last_completed_epoch(df, eval_id: str) -> int:
     """Find the last completed epoch for a given eval_id from epoch_end entries."""
     model_rows = df[df['eval_id'] == eval_id]
     if model_rows.empty:
@@ -123,18 +115,15 @@ def find_models_needing_continuation(
     Reads from train_epoch_log.csv to get all completed epochs.
     Returns list of (eval_id, last_epoch) tuples.
     """
-    # Read CSV file, handling malformed rows (some rows are missing newlines)
-    import re
-    with open(train_epoch_csv, 'r') as f:
-        content = f.read()
-    
-    # Fix malformed rows: add newlines before 'final-random' patterns (but not at start)
-    # Pattern: number followed by 'final-random' should have a newline inserted
-    content_fixed = re.sub(r'(\d+\.\d+)(final-random)', r'\1\n\2', content)
-    
-    # Read the fixed content
-    import io
-    df = pd.read_csv(io.StringIO(content_fixed))
+    import pandas as pd
+
+    try:
+        df = pd.read_csv(train_epoch_csv)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not parse {train_epoch_csv}. "
+            "The CSV appears malformed; rerun with file-locked logging enabled."
+        ) from exc
     
     # Filter to only epoch_end entries (completed epochs)
     epoch_end_df = df[df['phase'] == 'epoch_end'].copy()
@@ -159,6 +148,12 @@ def continue_training(
     target_epoch: int
 ):
     """Continue training a model from start_epoch to target_epoch."""
+    import torch
+    import torch.nn as nn
+    from qnas.models.hybrid_qnn import HybridQNN
+    from qnas.utils.datasets import get_dataloaders, IN_FEATURES, N_CLASSES
+    from qnas.utils.logging_utils import log_epoch, log_checkpoint, _append_progress
+    from qnas.utils.model_io import load_model_weights, save_model_weights
     
     # Set up environment for logging
     os.environ["QNAS_POOL_WORKER"] = "0"
@@ -363,25 +358,12 @@ Examples:
     for eid, last_epoch in models_to_continue:
         print(f"  - {eid}: last epoch {last_epoch} -> target epoch {target_epoch}")
     
-    # Set up logging paths by setting environment variables and module attributes
-    os.environ["LOG_DIR"] = str(run_dir)
+    # Set up logging paths for this existing run directory
     os.environ["DATASET_LOG_DIR"] = str(run_dir)
-    
-    # Import and update module-level attributes
-    import qnas.main as qnas_main
-    import qnas.utils.logging_utils as lu
     import qnas.utils.config as cfg
-    
-    qnas_main.LOG_DIR = str(run_dir)
-    qnas_main.DATASET_LOG_DIR = str(run_dir)
-    lu.DATASET_LOG_DIR = str(run_dir)
-    cfg.LOG_DIR = str(run_dir)
-    cfg.DATASET_LOG_DIR = str(run_dir)
-    
-    # Update CSV paths in logging_utils
-    lu.EPOCH_LOG_CSV = os.path.join(str(run_dir), "train_epoch_log.csv")
-    lu.CHECKPOINT_LOG_CSV = os.path.join(str(run_dir), "checkpoint_validation.csv")
-    lu.PROGRESS_LOG = os.path.join(str(run_dir), "progress.log")
+    import qnas.utils.logging_utils as lu
+    cfg.set_dataset_log_dir(str(run_dir), create=False)
+    lu.refresh_logging_paths(str(run_dir))
     
     # Process each model
     success_count = 0
@@ -427,4 +409,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

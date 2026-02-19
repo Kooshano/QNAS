@@ -20,19 +20,19 @@ from pymoo.core.problem import StarmapParallelization
 
 from ..models.config import QConfig
 from ..quantum.metrics import _modes_str
-from ..utils.logging_utils import _csv_reset_all, _append_progress, STATUS_DIR, NSGA_EVAL_CSV, DATASET_LOG_DIR
+from ..utils import logging_utils as log_utils
 from ..utils.model_io import save_model_weights
 from ..utils.config import (
     POP_SIZE, N_GEN, SEED, BATCH_SIZE, SHOTS, EVAL_EPOCHS,
-    LOG_DIR, RESUME_LOGS, WORKERS_PER_GPU,
+    RESUME_LOGS, WORKERS_PER_GPU,
     FINAL_TRAIN_GPU, FINAL_TRAIN_GPUS, FINAL_TRAIN_EPOCHS, FINAL_SHOTS,
     FINAL_TRAIN_SUBSET_SIZE, FINAL_VAL_SUBSET_SIZE,
-    TRAIN_SUBSET_SIZE, VAL_SUBSET_SIZE,
     PARETO_OBJECTIVES,
     WORKER_GPU_ID as DEFAULT_WORKER_GPU_ID,
     WORKER_RANK as DEFAULT_WORKER_RANK,
     STATUS_JSON_PATH as DEFAULT_STATUS_JSON_PATH
 )
+from ..utils import config as cfg
 from .problem import QNNHyperProblem, CSV_LOCK, GLOBAL_COUNTER, CURRENT_GENERATION
 
 # Module-level variables for worker state
@@ -91,7 +91,8 @@ def _mp_init(gpu_ids: List[int], log_dir: str, seed_base: int, lock_proxy, count
     torch.manual_seed(seed_base + local_rank)
     np.random.seed(seed_base + local_rank)
 
-    STATUS_JSON_PATH = os.path.join(STATUS_DIR, f"worker_gpu{WORKER_GPU_ID}_status.json")
+    log_utils.refresh_logging_paths()
+    STATUS_JSON_PATH = os.path.join(log_utils.STATUS_DIR, f"worker_gpu{WORKER_GPU_ID}_status.json")
 
 
 def _start_status_watcher(stop_evt: threading.Event, gpu_ids: List[int]):
@@ -102,7 +103,7 @@ def _start_status_watcher(stop_evt: threading.Event, gpu_ids: List[int]):
             time.sleep(2.0)
             lines = []
             for gid in gpu_ids:
-                path = os.path.join(STATUS_DIR, f"worker_gpu{gid}_status.json")
+                path = os.path.join(log_utils.STATUS_DIR, f"worker_gpu{gid}_status.json")
                 try:
                     with open(path, "r") as f:
                         s = json.load(f)
@@ -139,19 +140,31 @@ def run_nsga2() -> QConfig:
     # Mark main process (used to suppress import-time prints elsewhere)
     os.environ["QNAS_MAIN"] = "1"
 
+    # Create (or reuse) run directory explicitly at runtime.
+    run_dir = cfg.initialize_nsga_run_dir(force_new=False, copy_env_snapshot=True)
+    os.environ["DATASET_LOG_DIR"] = run_dir
+    os.environ["NSGA_EVAL_CSV"] = str(Path(run_dir) / "nsga_evals.csv")
+    os.environ["EPOCH_LOG_CSV"] = str(Path(run_dir) / "train_epoch_log.csv")
+    os.environ["GEN_SUMMARY_CSV"] = str(Path(run_dir) / "nsga_gen_summary.csv")
+    os.environ["CHECKPOINT_LOG_CSV"] = str(Path(run_dir) / "checkpoint_validation.csv")
+    os.environ["PROGRESS_LOG"] = str(Path(run_dir) / "progress.log")
+    log_utils.refresh_logging_paths(run_dir)
+
     # Reset logs at the very beginning of a run, unless RESUME_LOGS=1
     if not RESUME_LOGS:
-        _csv_reset_all()
+        log_utils._csv_reset_all()
 
     # So users always know where to find logs (DATASET_LOG_DIR is the run folder)
-    run_dir_abs = os.path.abspath(DATASET_LOG_DIR) if DATASET_LOG_DIR else "(none)"
+    run_dir_abs = os.path.abspath(cfg.DATASET_LOG_DIR) if cfg.DATASET_LOG_DIR else "(none)"
     print(f"Logs: {run_dir_abs}")
 
     num_visible = torch.cuda.device_count()
     gpu_ids = list(range(num_visible)) if num_visible > 0 else []
     print(f"Detected GPUs: {gpu_ids if gpu_ids else 'CPU only'}")
-    _append_progress(f"[MAIN] Using GPUs {gpu_ids if gpu_ids else 'CPU only'} | "
-                     f"BATCH_SIZE={BATCH_SIZE}, epochs per eval={EVAL_EPOCHS}, shots={SHOTS if SHOTS else 'adjoint'}")
+    log_utils._append_progress(
+        f"[MAIN] Using GPUs {gpu_ids if gpu_ids else 'CPU only'} | "
+        f"BATCH_SIZE={BATCH_SIZE}, epochs per eval={EVAL_EPOCHS}, shots={SHOTS if SHOTS else 'adjoint'}"
+    )
 
     manager = mp.Manager()
     lock_proxy = manager.RLock()
@@ -168,7 +181,7 @@ def run_nsga2() -> QConfig:
     
     pool = mp.Pool(processes=pool_size,
                    initializer=_mp_init,
-                   initargs=(gpu_ids if gpu_ids else [-1], LOG_DIR, SEED, lock_proxy, counter_proxy, generation_proxy, WORKERS_PER_GPU))
+                   initargs=(gpu_ids if gpu_ids else [-1], cfg.LOG_DIR, SEED, lock_proxy, counter_proxy, generation_proxy, WORKERS_PER_GPU))
 
     # Live status watcher in main process
     stop_evt = threading.Event()
@@ -198,7 +211,7 @@ def run_nsga2() -> QConfig:
             with prob_module.CSV_LOCK:
                 prob_module.CURRENT_GENERATION.value = 0
         except Exception:
-            pass
+            log_utils._append_progress("[WARN] Could not initialize generation counter; defaulting to 0")
 
     def _shutdown_pool(terminate: bool = False):
         stop_evt.set()
@@ -306,8 +319,9 @@ def _train_single_config(config_dict: dict, gpu_id: int) -> dict:
     
     # Set log directory environment variables (critical for spawn method)
     run_dir = Path(config_dict['run_dir'])
+    logs_root = run_dir.parents[2] if len(run_dir.parents) >= 3 else run_dir.parent
     os.environ["DATASET_LOG_DIR"] = str(run_dir)
-    os.environ["LOG_DIR"] = str(run_dir.parent.parent)
+    os.environ["LOG_DIR"] = str(logs_root)
     os.environ["IMPORTED_AS_MODULE"] = "false"
     os.environ["RUN_TYPE"] = "nsga"
     os.environ["NSGA_EVAL_CSV"] = str(run_dir / "nsga_evals.csv")
@@ -316,6 +330,11 @@ def _train_single_config(config_dict: dict, gpu_id: int) -> dict:
     os.environ["CHECKPOINT_LOG_CSV"] = str(run_dir / "checkpoint_validation.csv")
     os.environ["PROGRESS_LOG"] = str(run_dir / "progress.log")
     
+    from ..utils import config as cfg_module
+    from ..utils import logging_utils as lu
+    cfg_module.set_dataset_log_dir(str(run_dir), create=False)
+    lu.refresh_logging_paths(str(run_dir))
+
     # Now import modules
     import torch
     from ..models.config import QConfig
@@ -415,8 +434,9 @@ def final_train(best_cfg: QConfig, csv_path: Optional[Path] = None, gpus: Option
     print("="*80)
     
     # Determine CSV path
+    log_utils.refresh_logging_paths()
     if csv_path is None:
-        csv_path = Path(NSGA_EVAL_CSV)
+        csv_path = Path(log_utils.NSGA_EVAL_CSV)
     else:
         csv_path = Path(csv_path)
     
@@ -428,6 +448,14 @@ def final_train(best_cfg: QConfig, csv_path: Optional[Path] = None, gpus: Option
     
     # Determine run directory
     run_dir = csv_path.parent.resolve()
+    cfg.set_dataset_log_dir(str(run_dir), create=False)
+    os.environ["DATASET_LOG_DIR"] = str(run_dir)
+    os.environ["NSGA_EVAL_CSV"] = str(run_dir / "nsga_evals.csv")
+    os.environ["EPOCH_LOG_CSV"] = str(run_dir / "train_epoch_log.csv")
+    os.environ["GEN_SUMMARY_CSV"] = str(run_dir / "nsga_gen_summary.csv")
+    os.environ["CHECKPOINT_LOG_CSV"] = str(run_dir / "checkpoint_validation.csv")
+    os.environ["PROGRESS_LOG"] = str(run_dir / "progress.log")
+    log_utils.refresh_logging_paths(str(run_dir))
     
     # Check GPU availability - use FINAL_TRAIN_GPUS from config if not specified
     if gpus is None:
@@ -615,7 +643,8 @@ def _final_train_single(best_cfg: QConfig):
     global STATUS_JSON_PATH, WORKER_GPU_ID, WORKER_RANK
     WORKER_GPU_ID = FINAL_TRAIN_GPU
     WORKER_RANK = -1  # Main process
-    STATUS_JSON_PATH = os.path.join(STATUS_DIR, f"main_final_training_status.json")
+    log_utils.refresh_logging_paths()
+    STATUS_JSON_PATH = os.path.join(log_utils.STATUS_DIR, "main_final_training_status.json")
 
     # Update config module's worker variables
     _update_worker_info(WORKER_GPU_ID, WORKER_RANK)
@@ -646,7 +675,7 @@ def _final_train_single(best_cfg: QConfig):
     vloss, vacc, model, _, _ = train_for_budget(final_cfg, "final-best", FINAL_TRAIN_EPOCHS, 0, 0, 
                                         train_size=FINAL_TRAIN_SUBSET_SIZE, val_size=FINAL_VAL_SUBSET_SIZE)
     # Save weights to weights/{run_folder}/
-    run_folder_name = Path(DATASET_LOG_DIR).name if DATASET_LOG_DIR else "default"
+    run_folder_name = Path(cfg.DATASET_LOG_DIR).name if cfg.DATASET_LOG_DIR else "default"
     weights_dir = Path("weights") / run_folder_name
     weights_dir.mkdir(parents=True, exist_ok=True)
     save_path = weights_dir / f"hybrid_qnn_best_{best_cfg.embed_kind}_nq{best_cfg.n_qubits}_d{best_cfg.depth}.pt"

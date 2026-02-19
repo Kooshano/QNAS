@@ -131,8 +131,6 @@ def run_checkpoint_validation(model, loss_fn, cfg: QConfig, eval_id: str,
                 
                 # Clean up
                 del out, loss, images, labels
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
             
             tr_loss = run_loss / max(1, seen)
             tr_acc = 100.0 * correct / max(1, seen)
@@ -165,4 +163,3 @@ def run_checkpoint_validation(model, loss_fn, cfg: QConfig, eval_id: str,
             torch.cuda.synchronize()
         # Re-raise to allow outer handler to clean up properly
         raise
-
