@@ -25,7 +25,7 @@ from ..utils.model_io import save_model_weights
 from ..utils.config import (
     POP_SIZE, N_GEN, SEED, BATCH_SIZE, SHOTS, EVAL_EPOCHS,
     RESUME_LOGS, WORKERS_PER_GPU,
-    FINAL_TRAIN_GPU, FINAL_TRAIN_GPUS, FINAL_TRAIN_EPOCHS, FINAL_SHOTS,
+    FINAL_TRAIN_GPU, FINAL_TRAIN_GPUS, FINAL_TRAIN_EPOCHS, FINAL_SHOTS, FINAL_WORKERS_PER_GPU,
     FINAL_TRAIN_SUBSET_SIZE, FINAL_VAL_SUBSET_SIZE,
     PARETO_OBJECTIVES,
     WORKER_GPU_ID as DEFAULT_WORKER_GPU_ID,
@@ -542,7 +542,9 @@ def final_train(best_cfg: QConfig, csv_path: Optional[Path] = None, gpus: Option
         })
     
     print("-"*80)
-    print(f"\nStarting parallel training on {len(available_gpus)} GPUs...")
+    max_workers = len(available_gpus) * FINAL_WORKERS_PER_GPU
+    print(f"\nStarting parallel training on {len(available_gpus)} GPUs "
+          f"({FINAL_WORKERS_PER_GPU} worker(s)/GPU, {max_workers} total)...")
     run_folder_name = run_dir.name
     weights_dir = Path("weights") / run_folder_name
     print(f"Results will be saved to: {weights_dir}/")
@@ -559,7 +561,7 @@ def final_train(best_cfg: QConfig, csv_path: Optional[Path] = None, gpus: Option
     
     # Train in parallel using multiple GPUs
     results = []
-    with ProcessPoolExecutor(max_workers=len(available_gpus)) as executor:
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
         for i, config in enumerate(configs):
             gpu_id = available_gpus[i % len(available_gpus)]

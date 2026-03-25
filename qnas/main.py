@@ -98,6 +98,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "MAX_VAL_BATCHES": ("qnas.utils.config", "MAX_VAL_BATCHES"),
     "FINAL_TRAIN_EPOCHS": ("qnas.utils.config", "FINAL_TRAIN_EPOCHS"),
     "FINAL_TRAIN_GPU": ("qnas.utils.config", "FINAL_TRAIN_GPU"),
+    "FINAL_WORKERS_PER_GPU": ("qnas.utils.config", "FINAL_WORKERS_PER_GPU"),
     "DATASET": ("qnas.utils.config", "DATASET"),
     "BATCH_SIZE": ("qnas.utils.config", "BATCH_SIZE"),
     "TRAIN_SUBSET_SIZE": ("qnas.utils.config", "TRAIN_SUBSET_SIZE"),

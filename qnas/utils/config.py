@@ -125,6 +125,7 @@ MAX_VAL_BATCHES = _env_get_int("MAX_VAL_BATCHES", 20)
 FINAL_TRAIN_EPOCHS = _env_get_int("FINAL_TRAIN_EPOCHS", 3)
 FINAL_TRAIN_GPU = _env_get_int("FINAL_TRAIN_GPU", 0)
 FINAL_TRAIN_GPUS = _env_get_list("FINAL_TRAIN_GPUS", [])  # Empty = use all available
+FINAL_WORKERS_PER_GPU = _env_get_int("FINAL_WORKERS_PER_GPU", 1)
 PARETO_OBJECTIVES = _env_get_list("PARETO_OBJECTIVES", ["f1_1_minus_acc", "f2_circuit_cost"])
 
 # =========================
