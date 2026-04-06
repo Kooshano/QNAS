@@ -172,12 +172,14 @@ So: **logs** = where the framework records each run; **outputs** = where analysi
 ## Citation
 
 ```bibtex
-@software{qnas,
-  author = {Maleki, Kooshan},
-  title = {QNAS: Quantum Neural Architecture Search},
-  year = {2025},
+@inproceedings{Maleki2026qnas,
+  author = {Maleki, Kooshan and Marchisio, Alberto and Shafique, Muhammad},
+  title = {QNAS: A Neural Architecture Search Framework for Accurate and Efficient Quantum Neural Networks},
+  year = {2026},
   url = {https://github.com/Kooshano/QNAS},
-  orcid = {https://orcid.org/0009-0007-9865-6049}
+  organization = {IEEE},
+  booktitle={2026 International Joint Conference on Neural Networks (IJCNN)},
+  pages={1--8}
 }
 ```
 
